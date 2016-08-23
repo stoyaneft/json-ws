@@ -1,0 +1,235 @@
+<%
+const metadata = locals.metadata;
+const localName = locals.localName;
+%>(function (exports) {
+	'use strict';
+
+	const RpcClient = (function () {
+		try {
+			return require('json-ws/client');
+		} catch (e) {
+			return exports.RpcClient;
+		}
+	}());
+	const EventEmitter = RpcClient.ports.EventEmitter;
+	const RpcTunnel = RpcClient.tunnel;
+
+	const <%= localName %> = exports.<%=localName%> = class <%=localName%> extends EventEmitter {
+		constructor(url, sslSettings) {
+			super()
+			if (!url || typeof url !== 'string') {
+				throw new Error('Invalid proxy URL');
+			}
+			this.defaultTransport = 'http';
+			this.rpc = new RpcTunnel(url, sslSettings);
+			this.rpc.on('event', e => {
+				this.emit(e.name, e.data);
+			});
+			const self = this;
+			function rebind(obj) {
+				const result = {};
+				for (const i in obj) {
+					const prop = obj[i];
+					if (typeof prop === 'function') {
+						result[i] = prop.bind(self);
+					} else if (typeof prop === 'object') {
+						result[i] = rebind(prop);
+					}
+				}
+				return result;
+			}
+			for (const i in this) {
+				if (this[i] && this[i]._ns) {
+					this[i] = rebind(this[i]);
+				}
+			}
+		}
+
+		useHTTP() {
+			this.defaultTransport = 'http';
+			return this;
+		}
+
+		useWS() {
+			this.defaultTransport = 'ws';
+			return this;
+		}
+
+		close() {
+			this.rpc.close();
+		}
+
+		on(type, listener) {
+			if (this.listeners(type).length === 0) {
+				this.rpc.call({ method: 'rpc.on', params: [type], transport: 'ws' });
+			}
+			EventEmitter.prototype.addListener.call(this, type, listener);
+		}
+
+		addListener(type, listener) {
+			if (this.listeners(type).length === 0) {
+				this.rpc.call({ method: 'rpc.on', params: [type], transport: 'ws' });
+			}
+			EventEmitter.prototype.addListener.call(this, type, listener);
+		}
+
+		removeListener(type, listener) {
+			EventEmitter.prototype.removeListener.call(this, type, listener);
+			if (this.listeners(type).length === 0) {
+				this.rpc.call({ method: 'rpc.off', params: [type], transport: 'ws' });
+			}
+		}
+
+		removeAllListeners(type) {
+			EventEmitter.prototype.removeAllListeners.call(this, type);
+			this.rpc.call({ method: 'rpc.off', params: [type], transport: 'ws' });
+		}
+
+<%
+(function generateTypes() {
+	const types = Object.keys(metadata.types).map(key => metadata.types[key]);
+	types.forEach(type => {
+		if (type.enum) { %>
+		static <%-type.name%> (val) {
+			switch (val) {
+				<%-Object.keys(type.struct).map(key => 'case \'' + key + '\': return ' + type.struct[key]).join(';\n\t\t\t\t')%>;
+				<%-Object.keys(type.struct).map(key => 'case ' + type.struct[key] + ': return \'' + key + '\'').join(';\n\t\t\t\t')%>;
+			}
+		};
+		<%
+		}
+	});
+}())
+%>
+	}
+	Object.defineProperty(<%= localName %>, 'VERSION', { value: '<%= metadata.version.slice(0, metadata.version.lastIndexOf('.')) %>'});
+<%
+
+(function generateTypes() {
+	const types = Object.keys(metadata.types).map(function(key) { return metadata.types[key] });
+	types.forEach(function(type) {
+		if (type.enum) { %>
+	<%-Object.keys(type.struct).map(function(key) { return localName + '.' + type.name + '..' + key + ' = ' + type.struct[key] }).join(';\n\t')%>
+	Object.freeze(<%=localName%>.<%-type.name%>);
+<%
+		}
+	});
+}())
+%>
+<%
+function printArgs(methodName) {
+	return metadata.methods[methodName].params.map(function(p) { return p.name }).join(', ');
+}
+
+var stubs = {};
+function stubNamespace(ns) {
+	var dot = ns.lastIndexOf('.');
+	if (dot != -1) stubNamespace(ns.substr(0, dot));
+	if (stubs[ns]) return;
+	stubs[ns] = 1;
+%>	<%=localName%>.prototype.<%=ns%> = {_ns:true};
+<%
+}
+
+// Generate namespace stubs
+var namespaces = [];
+Object.keys(metadata.methods).forEach(function(methodName) {
+	var dot = methodName.lastIndexOf('.');
+	if (dot == -1) return;
+	var namespace = methodName.substr(0, dot);
+	if (namespaces.indexOf(namespace) == -1) namespaces.push(namespace);
+});
+
+%><%-namespaces.forEach(stubNamespace)%>
+<%
+
+function mapJavaScriptType(jsType, isArray) {
+	var returnType = '';
+	switch (jsType) {
+		case '*':
+		case 'any':
+		case 'object':
+		case 'json':
+			returnType = 'object';
+			break;
+
+		case 'int':
+		case 'integer':
+		case 'number':
+		case 'float':
+		case 'double':
+			returnType = 'number';
+			break;
+
+		case 'date':
+		case 'time':
+			returnType = 'Date';
+			break;
+
+		case 'bool':
+		case 'boolean':
+			returnType = 'boolean';
+			break;
+
+
+		case 'string':
+		case 'url':
+			returnType = 'string';
+			break;
+
+		case 'buffer':
+		case 'binary':
+			returnType = 'Uint8Array';
+			break;
+
+		case undefined:
+			returnType = '';
+			break;
+
+		default:
+			returnType = jsType;
+	}
+	return returnType + (isArray ? '[]' : '');
+}
+
+function getParameterNameWithOptional(param) {
+	if (param.required === false || typeof param.default !== 'undefined') {
+		return '[' + param.name + ']';
+	}
+
+	return param.name;
+}
+
+function getMethodArgumentsHelp(methodInfo, length) {
+	length = typeof length === 'number' ? length : methodInfo.params.length;
+	return methodInfo.params.slice(0, length).map(function(param) {
+		return '\n\t * @param {' + mapJavaScriptType(param.type, param.isArray) + '} ' + getParameterNameWithOptional(param) + ' ' + param.description;
+	}).join('');
+}
+// Generate method stubs
+Object.keys(metadata.methods).forEach(function(methodName) {
+	var methodInfo = metadata.methods[methodName];
+%>	/**
+	 * <%=methodInfo.description%><%=getMethodArgumentsHelp(methodInfo)%>
+<%= (methodInfo.returns) ? '\t * @returns {' + mapJavaScriptType(methodInfo.returns, methodInfo.returnsArray) + '}\n' : ''
+%>	 */
+	<%=localName%>.prototype.<%= methodName %> = function(<%-printArgs(methodName)%>) {
+		var args = Array.prototype.slice.call(arguments);
+		var callback = null;
+		if (args.length && typeof args[args.length - 1] === 'function') {
+			callback = args.pop();
+		}
+		<%if (metadata.methods[methodName].params.length > 0) { %>args.length = Math.min(<%-metadata.methods[methodName].params.length%>, args.length);<% } else { %>args.length = 0;<% } %>
+		return this.rpc.call({
+			method: '<%-methodName%>',
+			params: args,
+			expectReturn: <%-!!metadata.methods[methodName].returns || !!metadata.methods[methodName].async%>,
+			transport: this.defaultTransport
+		}, callback);
+	};
+
+<%
+});
+%>}(typeof module !== 'undefined' ? module.exports : window));
+
+//module.exports = <%=localName%>
